@@ -1,0 +1,8 @@
+.env
+data/
+backend/app/blobs/
+node_modules/
+__pycache__/
+.venv/
+dist/
+.pytest_cache/
