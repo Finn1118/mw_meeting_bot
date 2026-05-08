@@ -31,7 +31,7 @@ class RecallClient:
             "bot_name": bot_name,
             "recording_config": {
                 "transcript": {
-                    "provider": {"recallai_async": {"language_code": "en"}},
+                    "provider": {"meeting_captions": {"language_code": "en"}},
                     "diarization": {"use_separate_streams_when_available": True},
                 },
                 "video_mixed_mp4": {},

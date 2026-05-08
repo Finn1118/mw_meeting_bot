@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ChangeEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
@@ -28,6 +28,7 @@ export function ConversationDetail() {
   const [retrying, setRetrying] = useState(false)
   const missingMeetingId = !id
   const { latestEvent, connectionState } = useSSE(id)
+  const handledCompleteEventRef = useRef<string | null>(null)
 
   const refreshMeeting = useCallback(async (meetingId: string): Promise<void> => {
     try {
@@ -109,6 +110,11 @@ export function ConversationDetail() {
     }
 
     if (latestEvent.status === 'complete') {
+      const eventKey = `${meeting.id}:${meeting.updated_at}:${meeting.transcript_id ?? 'pending'}`
+      if (handledCompleteEventRef.current === eventKey) {
+        return undefined
+      }
+      handledCompleteEventRef.current = eventKey
       queueMicrotask(() => {
         void refreshMeeting(meeting.id)
       })
@@ -143,6 +149,11 @@ export function ConversationDetail() {
       const created = await apiClient.createMeeting({
         meeting_url: meeting.meeting_url,
         ...(meeting.title ? { title: meeting.title } : {}),
+        ...(meeting.org_id ? { org_id: meeting.org_id } : {}),
+        ...(meeting.created_by_uid ? { created_by_uid: meeting.created_by_uid } : {}),
+        ...(meeting.platform_conversation_id
+          ? { platform_conversation_id: meeting.platform_conversation_id }
+          : {}),
       })
       window.location.assign(`/meetings/${created.id}`)
     } catch {

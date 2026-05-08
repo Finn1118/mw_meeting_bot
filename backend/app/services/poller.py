@@ -1,8 +1,6 @@
 import asyncio
-import json
 import logging
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
@@ -13,6 +11,7 @@ from app.db import AsyncSessionLocal
 from app.events import bus
 from app.models import Meeting
 from app.services.recall import RecallApiError, RecallClient
+from app.services.storage import save_transcript_json
 from app.services.transcript import parse_transcript
 
 logger = logging.getLogger("uvicorn.error")
@@ -142,9 +141,9 @@ class BotPoller:
             return False
 
         raw_transcript = await self.recall.download_transcript_json(download_url)
-        transcript_path = save_transcript_json(self.settings.blobs_dir, meeting.id, raw_transcript)
+        transcript_key = save_transcript_json(self.settings.blobs_dir, meeting.id, raw_transcript)
 
-        meeting.transcript_path = str(transcript_path)
+        meeting.transcript_path = transcript_key
         meeting.transcript_id = transcript_id
         recording_id = recording.get("id")
         if isinstance(recording_id, str):
@@ -201,8 +200,3 @@ def transcript_download_url(metadata: dict[str, object]) -> str | None:
     return None
 
 
-def save_transcript_json(blobs_dir: str, meeting_id: str, raw_transcript: list[object]) -> Path:
-    path = Path(blobs_dir) / f"transcript_{meeting_id}.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(raw_transcript), encoding="utf-8")
-    return path

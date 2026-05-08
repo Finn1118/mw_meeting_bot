@@ -18,4 +18,11 @@ Local-first web app for dispatching a Recall.ai bot to Zoom, Google Meet, or Mic
 
 This build polls Recall every `POLL_INTERVAL_SECONDS` seconds for bot status updates instead of using webhooks. The poller updates meeting status, publishes SSE events, and downloads the transcript when Recall reports it is ready.
 
-To switch to webhooks later: set `RECALL_WEBHOOK_SECRET` and `PUBLIC_WEBHOOK_BASE_URL`, register `/api/webhooks/recall` in the Recall dashboard, uncomment the webhook router in `backend/app/main.py`, and disable the polling task in the FastAPI lifespan.
+Runtime behavior is controlled with environment variables:
+
+- `ALLOWED_ORIGINS` is a comma-separated list of frontend origins that may call the API.
+- `ENABLE_POLLER=true` starts the Recall polling task with the API process.
+- `ENABLE_WEBHOOKS=false` keeps the Recall webhook router disabled by default.
+- `ENABLE_GOOGLE_CALENDAR=true` enables the local Google Calendar routes and scheduler. Calendar auto-dispatch is stored per Google connection and defaults to off until enabled from the UI.
+
+To switch to webhooks later: set `RECALL_WEBHOOK_SECRET` and `PUBLIC_WEBHOOK_BASE_URL`, register `/api/webhooks/recall` in the Recall dashboard, set `ENABLE_WEBHOOKS=true`, and set `ENABLE_POLLER=false` if polling should be disabled.

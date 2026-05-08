@@ -11,6 +11,9 @@ class ErrorResponse(BaseModel):
 class MeetingCreate(BaseModel):
     meeting_url: str = Field(min_length=1)
     title: str | None = None
+    org_id: str | None = None
+    created_by_uid: str | None = None
+    platform_conversation_id: str | None = None
 
 
 class MeetingUpdate(BaseModel):
@@ -51,6 +54,9 @@ class MeetingRead(BaseModel):
     meeting_url: str
     platform: str
     title: str | None
+    org_id: str | None
+    created_by_uid: str | None
+    platform_conversation_id: str | None
     bot_id: str | None
     recording_id: str | None
     transcript_id: str | None
@@ -71,3 +77,35 @@ class MeetingRead(BaseModel):
 class MeetingList(BaseModel):
     items: list[MeetingRead]
     total: int
+
+
+class GoogleAuthStatus(BaseModel):
+    connected: bool
+    email: str | None
+
+
+class CalendarMeetingLink(BaseModel):
+    platform: str
+    url: str
+
+
+class CalendarEventRead(BaseModel):
+    id: str
+    title: str
+    start: str | None
+    end: str | None
+    organizer_email: str | None
+    html_link: str | None
+    meeting_link: CalendarMeetingLink | None
+
+
+class CalendarEventList(BaseModel):
+    items: list[CalendarEventRead]
+
+
+class AutoDispatchSetting(BaseModel):
+    enabled: bool
+
+
+class AutoDispatchUpdate(BaseModel):
+    enabled: bool

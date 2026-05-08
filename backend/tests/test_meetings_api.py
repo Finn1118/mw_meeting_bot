@@ -17,7 +17,13 @@ async def test_create_meeting_happy_path(
 ) -> None:
     response = await client.post(
         "/api/meetings",
-        json={"meeting_url": "https://meet.google.com/abc-defg-hij", "title": "Standup"},
+        json={
+            "meeting_url": "https://meet.google.com/abc-defg-hij",
+            "title": "Standup",
+            "org_id": "org_123",
+            "created_by_uid": "user_123",
+            "platform_conversation_id": "conv_123",
+        },
     )
 
     assert response.status_code == 200
@@ -25,11 +31,87 @@ async def test_create_meeting_happy_path(
     assert body["meeting_url"] == "https://meet.google.com/abc-defg-hij"
     assert body["platform"] == "meet"
     assert body["title"] == "Standup"
+    assert body["org_id"] == "org_123"
+    assert body["created_by_uid"] == "user_123"
+    assert body["platform_conversation_id"] == "conv_123"
     assert body["bot_id"] == "bot_test_123"
     assert body["status"] == "bot_created"
     assert fake_recall_client.created_bot_requests == [
         ("https://meet.google.com/abc-defg-hij", "Test Notetaker")
     ]
+
+
+@pytest.mark.asyncio
+async def test_list_meetings_filters_by_org_id(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with db_sessionmaker() as session:
+        session.add_all(
+            [
+                Meeting(
+                    id="meeting_org_1",
+                    meeting_url="https://meet.google.com/abc-defg-hij",
+                    platform="meet",
+                    org_id="org_1",
+                    status="complete",
+                    created_at=now,
+                    updated_at=now,
+                ),
+                Meeting(
+                    id="meeting_org_2",
+                    meeting_url="https://meet.google.com/xyz-abcd-efg",
+                    platform="meet",
+                    org_id="org_2",
+                    status="complete",
+                    created_at=now,
+                    updated_at=now,
+                ),
+            ]
+        )
+        await session.commit()
+
+    response = await client.get("/api/meetings?org_id=org_1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total"] == 1
+    assert body["items"][0]["id"] == "meeting_org_1"
+
+
+@pytest.mark.asyncio
+async def test_org_scoped_get_rejects_other_org(
+    client: AsyncClient,
+    db_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime.now(UTC)
+    async with db_sessionmaker() as session:
+        session.add(
+            Meeting(
+                id="meeting_123",
+                meeting_url="https://meet.google.com/abc-defg-hij",
+                platform="meet",
+                org_id="org_1",
+                status="complete",
+                created_at=now,
+                updated_at=now,
+            )
+        )
+        await session.commit()
+
+    response = await client.get("/api/meetings/meeting_123?org_id=org_2")
+
+    assert response.status_code == 404
+    assert response.json() == {"error": "not_found", "message": "Meeting not found."}
+
+
+@pytest.mark.asyncio
+async def test_request_id_header_is_echoed(client: AsyncClient) -> None:
+    response = await client.get("/api/health", headers={"X-Request-Id": "req_test_123"})
+
+    assert response.status_code == 200
+    assert response.headers["x-request-id"] == "req_test_123"
 
 
 @pytest.mark.asyncio

@@ -1,7 +1,5 @@
-import json
 from binascii import Error as BinasciiError
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request, status
@@ -15,6 +13,7 @@ from app.errors import ApiError
 from app.events import bus
 from app.models import Meeting, WebhookLog
 from app.services.recall import RecallClient
+from app.services.storage import save_transcript_json
 from app.services.transcript import parse_transcript
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
@@ -136,9 +135,9 @@ async def dispatch_webhook_event(
         transcript_metadata = await recall_client.get_transcript(transcript_id)
         download_url = extract_download_url(transcript_metadata)
         raw_transcript = await recall_client.download_transcript_json(download_url)
-        transcript_path = save_transcript_json(settings.blobs_dir, meeting.id, raw_transcript)
+        transcript_key = save_transcript_json(settings.blobs_dir, meeting.id, raw_transcript)
         await parse_transcript(meeting.id, raw_transcript, session)
-        meeting.transcript_path = str(transcript_path)
+        meeting.transcript_path = transcript_key
         meeting.status = "complete"
 
 
@@ -173,9 +172,3 @@ def extract_download_url(transcript_metadata: dict[str, object]) -> str:
     raise ValueError("missing_transcript_download_url")
 
 
-def save_transcript_json(blobs_dir: str, meeting_id: str, raw_transcript: list[object]) -> Path:
-    directory = Path(blobs_dir)
-    directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"transcript_{meeting_id}.json"
-    path.write_text(json.dumps(raw_transcript), encoding="utf-8")
-    return path

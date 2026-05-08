@@ -19,6 +19,9 @@ describe('apiClient', () => {
           meeting_url: 'https://meet.google.com/abc-defg-hij',
           platform: 'meet',
           title: 'Standup',
+          org_id: 'org_123',
+          created_by_uid: 'user_123',
+          platform_conversation_id: 'conv_123',
           bot_id: 'bot_123',
           recording_id: null,
           transcript_id: null,
@@ -42,6 +45,9 @@ describe('apiClient', () => {
     const meeting = await apiClient.createMeeting({
       meeting_url: 'https://meet.google.com/abc-defg-hij',
       title: 'Standup',
+      org_id: 'org_123',
+      created_by_uid: 'user_123',
+      platform_conversation_id: 'conv_123',
     })
 
     expect(meeting.id).toBe('meeting_123')
@@ -51,6 +57,9 @@ describe('apiClient', () => {
       body: JSON.stringify({
         meeting_url: 'https://meet.google.com/abc-defg-hij',
         title: 'Standup',
+        org_id: 'org_123',
+        created_by_uid: 'user_123',
+        platform_conversation_id: 'conv_123',
       }),
     })
   })
@@ -60,11 +69,14 @@ describe('apiClient', () => {
       new Response(JSON.stringify({ items: [], total: 0 }), { status: 200 }),
     )
 
-    await apiClient.listMeetings({ limit: 10, offset: 20, platform: 'zoom' })
+    await apiClient.listMeetings({ limit: 10, offset: 20, platform: 'zoom', org_id: 'org_123' })
 
-    expect(fetchMock).toHaveBeenCalledWith('/api/meetings?limit=10&offset=20&platform=zoom', {
-      headers: { 'Content-Type': 'application/json' },
-    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/meetings?limit=10&offset=20&platform=zoom&org_id=org_123',
+      {
+        headers: { 'Content-Type': 'application/json' },
+      },
+    )
   })
 
   it('throws typed errors for non-2xx responses', async () => {
@@ -87,5 +99,16 @@ describe('apiClient', () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }))
 
     await expect(apiClient.deleteMeeting('meeting_123')).resolves.toBeUndefined()
+  })
+
+  it('updates calendar auto-dispatch setting', async () => {
+    fetchMock.mockResolvedValueOnce(new Response(JSON.stringify({ enabled: true }), { status: 200 }))
+
+    await expect(apiClient.updateCalendarAutoDispatch(true)).resolves.toEqual({ enabled: true })
+    expect(fetchMock).toHaveBeenCalledWith('/api/calendar/auto-dispatch', {
+      headers: { 'Content-Type': 'application/json' },
+      method: 'PATCH',
+      body: JSON.stringify({ enabled: true }),
+    })
   })
 })

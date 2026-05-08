@@ -19,6 +19,9 @@ export type ApiErrorBody = {
 export type MeetingCreate = {
   meeting_url: string
   title?: string
+  org_id?: string
+  created_by_uid?: string
+  platform_conversation_id?: string
 }
 
 export type MeetingUpdate = {
@@ -53,6 +56,9 @@ export type MeetingRead = {
   meeting_url: string
   platform: MeetingPlatform
   title: string | null
+  org_id: string | null
+  created_by_uid: string | null
+  platform_conversation_id: string | null
   bot_id: string | null
   recording_id: string | null
   transcript_id: string | null
@@ -78,6 +84,34 @@ export type MeetingList = {
 export type HealthResponse = {
   ok: boolean
   version: string
+}
+
+export type GoogleAuthStatus = {
+  connected: boolean
+  email: string | null
+}
+
+export type CalendarMeetingLink = {
+  platform: MeetingPlatform
+  url: string
+}
+
+export type CalendarEventRead = {
+  id: string
+  title: string
+  start: string | null
+  end: string | null
+  organizer_email: string | null
+  html_link: string | null
+  meeting_link: CalendarMeetingLink | null
+}
+
+export type CalendarEventList = {
+  items: CalendarEventRead[]
+}
+
+export type AutoDispatchSetting = {
+  enabled: boolean
 }
 
 export type SseUpdate = {

@@ -182,7 +182,7 @@ async def test_done_with_ready_transcript_finalizes_meeting(
     assert meeting.status == "complete"
     assert meeting.transcript_id == "transcript_123"
     assert meeting.recording_id == "recording_123"
-    assert meeting.transcript_path == str(tmp_path / "blobs" / "transcript_meeting_123.json")
+    assert meeting.transcript_path == "transcripts/meeting_123.json"
     assert [event[1]["status"] for event in published_events] == ["complete"]
 
     async with db_sessionmaker() as session:

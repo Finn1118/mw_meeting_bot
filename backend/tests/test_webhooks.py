@@ -199,7 +199,7 @@ async def test_transcript_done_fetches_downloads_and_persists_segments(
         assert meeting is not None
         assert meeting.status == "complete"
         assert meeting.transcript_id == "transcript_123"
-        assert meeting.transcript_path == str(tmp_path / "blobs" / "transcript_meeting_123.json")
+        assert meeting.transcript_path == "transcripts/meeting_123.json"
 
         participant = await session.scalar(select(Participant))
         assert participant is not None
@@ -215,5 +215,5 @@ async def test_transcript_done_fetches_downloads_and_persists_segments(
         assert segment.start_ms == 500
         assert segment.end_ms == 1300
 
-    saved_transcript = tmp_path / "blobs" / "transcript_meeting_123.json"
+    saved_transcript = tmp_path / "blobs" / "transcripts" / "meeting_123.json"
     assert json.loads(saved_transcript.read_text(encoding="utf-8")) == fake_recall_client.transcript_json

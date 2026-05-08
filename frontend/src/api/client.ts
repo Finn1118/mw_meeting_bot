@@ -1,4 +1,7 @@
 import type {
+  AutoDispatchSetting,
+  CalendarEventList,
+  GoogleAuthStatus,
   HealthResponse,
   MeetingCreate,
   MeetingList,
@@ -62,6 +65,7 @@ function meetingListQuery(params?: {
   limit?: number
   offset?: number
   platform?: MeetingPlatform
+  org_id?: string
 }): string {
   const search = new URLSearchParams()
   if (params?.limit !== undefined) {
@@ -73,13 +77,45 @@ function meetingListQuery(params?: {
   if (params?.platform !== undefined) {
     search.set('platform', params.platform)
   }
+  if (params?.org_id !== undefined) {
+    search.set('org_id', params.org_id)
+  }
   const query = search.toString()
   return query ? `?${query}` : ''
+}
+
+function orgScopeQuery(orgId?: string): string {
+  return orgId ? `?${new URLSearchParams({ org_id: orgId }).toString()}` : ''
 }
 
 export const apiClient = {
   health(): Promise<HealthResponse> {
     return request<HealthResponse>('/api/health')
+  },
+
+  googleAuthStatus(): Promise<GoogleAuthStatus> {
+    return request<GoogleAuthStatus>('/api/auth/google/status')
+  },
+
+  disconnectGoogle(): Promise<{ ok: boolean }> {
+    return request<{ ok: boolean }>('/api/auth/google/disconnect', {
+      method: 'POST',
+    })
+  },
+
+  listCalendarEvents(days = 7): Promise<CalendarEventList> {
+    return request<CalendarEventList>(`/api/calendar/events?days=${encodeURIComponent(days)}`)
+  },
+
+  getCalendarAutoDispatch(): Promise<AutoDispatchSetting> {
+    return request<AutoDispatchSetting>('/api/calendar/auto-dispatch')
+  },
+
+  updateCalendarAutoDispatch(enabled: boolean): Promise<AutoDispatchSetting> {
+    return request<AutoDispatchSetting>('/api/calendar/auto-dispatch', {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    })
   },
 
   createMeeting(payload: MeetingCreate): Promise<MeetingRead> {
@@ -93,23 +129,24 @@ export const apiClient = {
     limit?: number
     offset?: number
     platform?: MeetingPlatform
+    org_id?: string
   }): Promise<MeetingList> {
     return request<MeetingList>(`/api/meetings${meetingListQuery(params)}`)
   },
 
-  getMeeting(id: string): Promise<MeetingRead> {
-    return request<MeetingRead>(`/api/meetings/${encodeURIComponent(id)}`)
+  getMeeting(id: string, orgId?: string): Promise<MeetingRead> {
+    return request<MeetingRead>(`/api/meetings/${encodeURIComponent(id)}${orgScopeQuery(orgId)}`)
   },
 
-  updateMeeting(id: string, payload: MeetingUpdate): Promise<MeetingRead> {
-    return request<MeetingRead>(`/api/meetings/${encodeURIComponent(id)}`, {
+  updateMeeting(id: string, payload: MeetingUpdate, orgId?: string): Promise<MeetingRead> {
+    return request<MeetingRead>(`/api/meetings/${encodeURIComponent(id)}${orgScopeQuery(orgId)}`, {
       method: 'PATCH',
       body: JSON.stringify(payload),
     })
   },
 
-  deleteMeeting(id: string): Promise<void> {
-    return request<void>(`/api/meetings/${encodeURIComponent(id)}`, {
+  deleteMeeting(id: string, orgId?: string): Promise<void> {
+    return request<void>(`/api/meetings/${encodeURIComponent(id)}${orgScopeQuery(orgId)}`, {
       method: 'DELETE',
     })
   },
@@ -118,9 +155,10 @@ export const apiClient = {
     meetingId: string,
     participantId: number,
     payload: ParticipantUpdate,
+    orgId?: string,
   ): Promise<ParticipantRead> {
     return request<ParticipantRead>(
-      `/api/meetings/${encodeURIComponent(meetingId)}/participants/${participantId}`,
+      `/api/meetings/${encodeURIComponent(meetingId)}/participants/${participantId}${orgScopeQuery(orgId)}`,
       {
         method: 'PATCH',
         body: JSON.stringify(payload),

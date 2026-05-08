@@ -28,7 +28,7 @@ async def test_create_bot_success(httpx_mock: HTTPXMock) -> None:
     assert request.read() == (
         b'{"meeting_url":"https://meet.google.com/abc-defg-hij",'
         b'"bot_name":"Notetaker",'
-        b'"recording_config":{"transcript":{"provider":{"recallai_async":{"language_code":"en"}},'
+        b'"recording_config":{"transcript":{"provider":{"meeting_captions":{"language_code":"en"}},'
         b'"diarization":{"use_separate_streams_when_available":true}},'
         b'"video_mixed_mp4":{},'
         b'"retention":{"type":"timed","hours":24}},'

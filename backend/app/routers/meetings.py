@@ -1,10 +1,11 @@
+import logging
 from datetime import UTC, datetime
 from typing import Annotated
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Response, status
-from sqlalchemy import Select, func, select, update
+from sqlalchemy import ColumnElement, Select, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -25,6 +26,7 @@ from app.services.recall import RecallApiError, RecallClient, RecallPoolExhauste
 from app.services.url_parser import parse_meeting_url
 
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
+logger = logging.getLogger("uvicorn.error")
 
 SessionDep = Annotated[AsyncSession, Depends(get_session)]
 RecallDep = Annotated[RecallClient, Depends(get_recall_client)]
@@ -50,10 +52,18 @@ def bot_id_from_response(response: dict[str, object]) -> str:
     return bot_id
 
 
-async def get_active_meeting_or_404(session: AsyncSession, meeting_id: str) -> Meeting:
+async def get_active_meeting_or_404(
+    session: AsyncSession,
+    meeting_id: str,
+    org_id: str | None = None,
+) -> Meeting:
+    filters = [Meeting.id == meeting_id, Meeting.deleted_at.is_(None)]
+    if org_id is not None:
+        filters.append(Meeting.org_id == org_id)
+
     meeting = await session.scalar(
         select(Meeting)
-        .where(Meeting.id == meeting_id, Meeting.deleted_at.is_(None))
+        .where(*filters)
         .options(selectinload(Meeting.participants), selectinload(Meeting.segments))
     )
     if meeting is None:
@@ -79,6 +89,9 @@ async def create_meeting(
         meeting_url=parsed_url.normalized_url,
         platform=parsed_url.platform,
         title=payload.title,
+        org_id=payload.org_id,
+        created_by_uid=payload.created_by_uid,
+        platform_conversation_id=payload.platform_conversation_id,
         status="dispatching",
         created_at=now,
         updated_at=now,
@@ -96,12 +109,17 @@ async def create_meeting(
         meeting.updated_at = utc_now()
         await session.commit()
     except RecallPoolExhausted as exc:
+        logger.warning("Recall bot pool exhausted during dispatch: status=%s body=%s", exc.status_code, exc.body)
         meeting.status = "failed"
         meeting.sub_code = "dispatch_error"
         meeting.updated_at = utc_now()
         await session.commit()
         raise error_response(status.HTTP_507_INSUFFICIENT_STORAGE, "recall_pool_exhausted", "Recall bot pool is exhausted. Try again later.") from exc
     except (RecallApiError, httpx.HTTPError, ValueError) as exc:
+        if isinstance(exc, RecallApiError):
+            logger.warning("Recall dispatch failed: status=%s body=%s", exc.status_code, exc.body)
+        else:
+            logger.warning("Recall dispatch failed before API response: %s", exc)
         meeting.status = "failed"
         meeting.sub_code = "dispatch_error"
         meeting.updated_at = utc_now()
@@ -118,10 +136,13 @@ async def list_meetings(
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     platform: Annotated[str | None, Query(pattern="^(zoom|meet|teams)$")] = None,
+    org_id: Annotated[str | None, Query(min_length=1)] = None,
 ) -> MeetingList:
-    filters = [Meeting.deleted_at.is_(None)]
+    filters: list[ColumnElement[bool]] = [Meeting.deleted_at.is_(None)]
     if platform is not None:
         filters.append(Meeting.platform == platform)
+    if org_id is not None:
+        filters.append(Meeting.org_id == org_id)
 
     total = await session.scalar(select(func.count()).select_from(Meeting).where(*filters))
     query: Select[tuple[Meeting]] = (
@@ -137,8 +158,12 @@ async def list_meetings(
 
 
 @router.get("/{meeting_id}", response_model=MeetingRead, responses={404: {"model": ErrorResponse}})
-async def get_meeting(meeting_id: str, session: SessionDep) -> MeetingRead:
-    meeting = await get_active_meeting_or_404(session, meeting_id)
+async def get_meeting(
+    meeting_id: str,
+    session: SessionDep,
+    org_id: Annotated[str | None, Query(min_length=1)] = None,
+) -> MeetingRead:
+    meeting = await get_active_meeting_or_404(session, meeting_id, org_id)
     return meeting_read(meeting)
 
 
@@ -147,8 +172,9 @@ async def update_meeting(
     meeting_id: str,
     payload: MeetingUpdate,
     session: SessionDep,
+    org_id: Annotated[str | None, Query(min_length=1)] = None,
 ) -> MeetingRead:
-    meeting = await get_active_meeting_or_404(session, meeting_id)
+    meeting = await get_active_meeting_or_404(session, meeting_id, org_id)
     meeting.title = payload.title
     meeting.updated_at = utc_now()
     await session.commit()
@@ -157,8 +183,12 @@ async def update_meeting(
 
 
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT, responses={404: {"model": ErrorResponse}})
-async def delete_meeting(meeting_id: str, session: SessionDep) -> Response:
-    meeting = await get_active_meeting_or_404(session, meeting_id)
+async def delete_meeting(
+    meeting_id: str,
+    session: SessionDep,
+    org_id: Annotated[str | None, Query(min_length=1)] = None,
+) -> Response:
+    meeting = await get_active_meeting_or_404(session, meeting_id, org_id)
     meeting.deleted_at = utc_now()
     meeting.updated_at = utc_now()
     await session.commit()
@@ -175,7 +205,9 @@ async def update_participant(
     participant_id: int,
     payload: ParticipantUpdate,
     session: SessionDep,
+    org_id: Annotated[str | None, Query(min_length=1)] = None,
 ) -> ParticipantRead:
+    await get_active_meeting_or_404(session, meeting_id, org_id)
     participant = await session.scalar(
         select(Participant).where(
             Participant.id == participant_id,

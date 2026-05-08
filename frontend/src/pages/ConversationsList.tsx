@@ -13,6 +13,7 @@ export function ConversationsList() {
   const [data, setData] = useState<MeetingList | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+  const [deletingId, setDeletingId] = useState<string | null>(null)
 
   useEffect(() => {
     let ignore = false
@@ -55,6 +56,25 @@ export function ConversationsList() {
     }
   }, [filter])
 
+  async function handleDelete(meeting: MeetingRead): Promise<void> {
+    setDeletingId(meeting.id)
+    try {
+      await apiClient.deleteMeeting(meeting.id)
+      setData((current) =>
+        current
+          ? {
+              items: current.items.filter((item) => item.id !== meeting.id),
+              total: Math.max(0, current.total - 1),
+            }
+          : current,
+      )
+    } catch {
+      setError('Could not delete conversation.')
+    } finally {
+      setDeletingId(null)
+    }
+  }
+
   return (
     <main className="min-h-screen bg-zinc-950 px-6 py-10 text-zinc-100">
       <section className="mx-auto max-w-6xl">
@@ -65,12 +85,20 @@ export function ConversationsList() {
             </p>
             <h1 className="mt-2 text-3xl font-semibold tracking-tight">My Conversations</h1>
           </div>
-          <Link
-            className="inline-flex w-fit items-center rounded-xl bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-white"
-            to="/meetings/new"
-          >
-            New meeting
-          </Link>
+          <div className="flex flex-wrap gap-3">
+            <Link
+              className="inline-flex w-fit items-center rounded-xl border border-zinc-700 px-4 py-2.5 text-sm font-medium text-zinc-200 transition hover:bg-zinc-800"
+              to="/calendar"
+            >
+              Calendar
+            </Link>
+            <Link
+              className="inline-flex w-fit items-center rounded-xl bg-zinc-100 px-4 py-2.5 text-sm font-medium text-zinc-950 transition hover:bg-white"
+              to="/meetings/new"
+            >
+              New meeting
+            </Link>
+          </div>
         </header>
 
         <div className="mt-6 flex items-center gap-3">
@@ -105,6 +133,7 @@ export function ConversationsList() {
                   <th className="px-4 py-3 font-medium">Started</th>
                   <th className="px-4 py-3 font-medium">Duration</th>
                   <th className="px-4 py-3 font-medium">Participants</th>
+                  <th className="px-4 py-3 text-right font-medium">Actions</th>
                 </tr>
               </thead>
               <tbody>
@@ -122,6 +151,35 @@ export function ConversationsList() {
                     <td className="px-4 py-4 text-zinc-400">{relativeTime(meeting.started_at)}</td>
                     <td className="px-4 py-4 text-zinc-400">{formatDuration(meeting.duration_sec)}</td>
                     <td className="px-4 py-4 text-zinc-400">{participantsSummary(meeting)}</td>
+                    <td className="px-4 py-4 text-right">
+                      <button
+                        aria-label={`Delete ${meetingTitle(meeting)}`}
+                        className="inline-flex size-8 items-center justify-center rounded-lg border border-red-500/30 text-red-200 transition hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50"
+                        disabled={deletingId === meeting.id}
+                        onClick={(event) => {
+                          event.stopPropagation()
+                          void handleDelete(meeting)
+                        }}
+                        type="button"
+                      >
+                        <svg
+                          aria-hidden="true"
+                          className="size-4"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth="1.8"
+                          viewBox="0 0 24 24"
+                        >
+                          <path d="M3 6h18" />
+                          <path d="M8 6V4h8v2" />
+                          <path d="M6 6l1 14h10l1-14" />
+                          <path d="M10 11v5" />
+                          <path d="M14 11v5" />
+                        </svg>
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>

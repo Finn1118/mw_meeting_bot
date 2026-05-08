@@ -7,6 +7,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
+from app.config import get_settings
 from app.models import Base
 
 # this is the Alembic Config object, which provides
@@ -24,7 +25,7 @@ if config.config_file_name is not None:
 # target_metadata = mymodel.Base.metadata
 target_metadata = Base.metadata
 
-database_url = os.getenv("DATABASE_URL")
+database_url = os.getenv("DATABASE_URL") or get_settings().database_url
 if database_url:
     config.set_main_option("sqlalchemy.url", database_url)
 
