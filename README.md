@@ -145,15 +145,7 @@ pnpm dev
 - Secret Manager secrets: `RECALL_API_KEY`, `GOOGLE_OAUTH_CLIENT_ID`, `GOOGLE_OAUTH_CLIENT_SECRET`, `DATABASE_URL`
 - `MEETING_BOT_SERVICE_URL` set in Firebase Functions environment config
 
-### Why Cloud Run (not Firebase Functions)
 
-Three pieces of this service don't map cleanly to stateless Firebase Functions:
-
-1. **Background polling loop** — polls Recall every N seconds for all in-flight meetings; needs an always-on in-process loop
-2. **SSE stream** — holds long-lived HTTP connections open to push real-time updates to the browser
-3. **Calendar auto-dispatcher** — another always-on loop that monitors upcoming calendar events
-
-Firebase Functions remain the right home for the **authenticated gateway layer** — they verify Firebase Auth tokens, check org membership, and forward requests to this service using a Google ID token for service-to-service auth on Cloud Run.
 
 ### Switching from polling to webhooks
 
