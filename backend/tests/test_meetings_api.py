@@ -1,18 +1,58 @@
 from datetime import UTC, datetime
 
 import pytest
-from httpx import AsyncClient
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from google.cloud.firestore_v1 import AsyncClient
+from httpx import AsyncClient as HttpAsyncClient
 
-from app.models import Meeting, Participant, TranscriptSegment
+from app.repositories import meetings as meetings_repo
 from app.services.recall import RecallApiError
 from tests.conftest import FakeRecallClient
+
+ORG_ID = "org_123"
+
+
+def now() -> datetime:
+    return datetime.now(UTC)
+
+
+async def seed_meeting(
+    db: AsyncClient,
+    *,
+    meeting_id: str = "meeting_123",
+    org_id: str = ORG_ID,
+    platform: str = "meet",
+    status: str = "complete",
+) -> dict[str, object]:
+    timestamp = now()
+    meeting = {
+        "id": meeting_id,
+        "meeting_url": "https://meet.google.com/abc-defg-hij",
+        "platform": platform,
+        "title": None,
+        "org_id": org_id,
+        "created_by_uid": None,
+        "platform_conversation_id": None,
+        "bot_id": None,
+        "recording_id": None,
+        "transcript_id": None,
+        "status": status,
+        "sub_code": None,
+        "started_at": None,
+        "ended_at": None,
+        "duration_sec": None,
+        "transcript_path": None,
+        "recording_path": None,
+        "deleted_at": None,
+        "participants": [],
+        "created_at": timestamp,
+        "updated_at": timestamp,
+    }
+    return await meetings_repo.create_meeting(db, meeting)
 
 
 @pytest.mark.asyncio
 async def test_create_meeting_happy_path(
-    client: AsyncClient,
+    client: HttpAsyncClient,
     fake_recall_client: FakeRecallClient,
 ) -> None:
     response = await client.post(
@@ -20,7 +60,7 @@ async def test_create_meeting_happy_path(
         json={
             "meeting_url": "https://meet.google.com/abc-defg-hij",
             "title": "Standup",
-            "org_id": "org_123",
+            "org_id": ORG_ID,
             "created_by_uid": "user_123",
             "platform_conversation_id": "conv_123",
         },
@@ -31,7 +71,7 @@ async def test_create_meeting_happy_path(
     assert body["meeting_url"] == "https://meet.google.com/abc-defg-hij"
     assert body["platform"] == "meet"
     assert body["title"] == "Standup"
-    assert body["org_id"] == "org_123"
+    assert body["org_id"] == ORG_ID
     assert body["created_by_uid"] == "user_123"
     assert body["platform_conversation_id"] == "conv_123"
     assert body["bot_id"] == "bot_test_123"
@@ -42,35 +82,22 @@ async def test_create_meeting_happy_path(
 
 
 @pytest.mark.asyncio
+async def test_create_meeting_requires_org_id(client: HttpAsyncClient) -> None:
+    response = await client.post(
+        "/api/meetings",
+        json={"meeting_url": "https://meet.google.com/abc-defg-hij"},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.asyncio
 async def test_list_meetings_filters_by_org_id(
-    client: AsyncClient,
-    db_sessionmaker: async_sessionmaker[AsyncSession],
+    client: HttpAsyncClient,
+    firestore_client: AsyncClient,
 ) -> None:
-    now = datetime.now(UTC)
-    async with db_sessionmaker() as session:
-        session.add_all(
-            [
-                Meeting(
-                    id="meeting_org_1",
-                    meeting_url="https://meet.google.com/abc-defg-hij",
-                    platform="meet",
-                    org_id="org_1",
-                    status="complete",
-                    created_at=now,
-                    updated_at=now,
-                ),
-                Meeting(
-                    id="meeting_org_2",
-                    meeting_url="https://meet.google.com/xyz-abcd-efg",
-                    platform="meet",
-                    org_id="org_2",
-                    status="complete",
-                    created_at=now,
-                    updated_at=now,
-                ),
-            ]
-        )
-        await session.commit()
+    await seed_meeting(firestore_client, meeting_id="meeting_org_1", org_id="org_1")
+    await seed_meeting(firestore_client, meeting_id="meeting_org_2", org_id="org_2")
 
     response = await client.get("/api/meetings?org_id=org_1")
 
@@ -82,23 +109,10 @@ async def test_list_meetings_filters_by_org_id(
 
 @pytest.mark.asyncio
 async def test_org_scoped_get_rejects_other_org(
-    client: AsyncClient,
-    db_sessionmaker: async_sessionmaker[AsyncSession],
+    client: HttpAsyncClient,
+    firestore_client: AsyncClient,
 ) -> None:
-    now = datetime.now(UTC)
-    async with db_sessionmaker() as session:
-        session.add(
-            Meeting(
-                id="meeting_123",
-                meeting_url="https://meet.google.com/abc-defg-hij",
-                platform="meet",
-                org_id="org_1",
-                status="complete",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        await session.commit()
+    await seed_meeting(firestore_client, meeting_id="meeting_123", org_id="org_1")
 
     response = await client.get("/api/meetings/meeting_123?org_id=org_2")
 
@@ -107,7 +121,7 @@ async def test_org_scoped_get_rejects_other_org(
 
 
 @pytest.mark.asyncio
-async def test_request_id_header_is_echoed(client: AsyncClient) -> None:
+async def test_request_id_header_is_echoed(client: HttpAsyncClient) -> None:
     response = await client.get("/api/health", headers={"X-Request-Id": "req_test_123"})
 
     assert response.status_code == 200
@@ -115,8 +129,11 @@ async def test_request_id_header_is_echoed(client: AsyncClient) -> None:
 
 
 @pytest.mark.asyncio
-async def test_create_meeting_rejects_invalid_url(client: AsyncClient) -> None:
-    response = await client.post("/api/meetings", json={"meeting_url": "https://example.com"})
+async def test_create_meeting_rejects_invalid_url(client: HttpAsyncClient) -> None:
+    response = await client.post(
+        "/api/meetings",
+        json={"meeting_url": "https://example.com", "org_id": ORG_ID},
+    )
 
     assert response.status_code == 400
     assert response.json() == {
@@ -127,14 +144,14 @@ async def test_create_meeting_rejects_invalid_url(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_create_meeting_marks_failed_on_recall_error(
-    client: AsyncClient,
+    client: HttpAsyncClient,
     fake_recall_client: FakeRecallClient,
 ) -> None:
     fake_recall_client.create_bot_error = RecallApiError(500, "server error")
 
     response = await client.post(
         "/api/meetings",
-        json={"meeting_url": "https://meet.google.com/abc-defg-hij"},
+        json={"meeting_url": "https://meet.google.com/abc-defg-hij", "org_id": ORG_ID},
     )
 
     assert response.status_code == 502
@@ -143,7 +160,7 @@ async def test_create_meeting_marks_failed_on_recall_error(
         "message": "Recall API request failed.",
     }
 
-    list_response = await client.get("/api/meetings")
+    list_response = await client.get(f"/api/meetings?org_id={ORG_ID}")
     assert list_response.status_code == 200
     item = list_response.json()["items"][0]
     assert item["status"] == "failed"
@@ -151,41 +168,44 @@ async def test_create_meeting_marks_failed_on_recall_error(
 
 
 @pytest.mark.asyncio
-async def test_get_missing_meeting_returns_404(client: AsyncClient) -> None:
-    response = await client.get("/api/meetings/missing")
+async def test_get_missing_meeting_returns_404(client: HttpAsyncClient) -> None:
+    response = await client.get(f"/api/meetings/missing?org_id={ORG_ID}")
 
     assert response.status_code == 404
     assert response.json() == {"error": "not_found", "message": "Meeting not found."}
 
 
 @pytest.mark.asyncio
-async def test_delete_meeting_soft_deletes(client: AsyncClient) -> None:
+async def test_delete_meeting_soft_deletes(client: HttpAsyncClient) -> None:
     create_response = await client.post(
         "/api/meetings",
-        json={"meeting_url": "https://meet.google.com/abc-defg-hij"},
+        json={"meeting_url": "https://meet.google.com/abc-defg-hij", "org_id": ORG_ID},
     )
     meeting_id = create_response.json()["id"]
 
-    delete_response = await client.delete(f"/api/meetings/{meeting_id}")
+    delete_response = await client.delete(f"/api/meetings/{meeting_id}?org_id={ORG_ID}")
     assert delete_response.status_code == 204
 
-    get_response = await client.get(f"/api/meetings/{meeting_id}")
+    get_response = await client.get(f"/api/meetings/{meeting_id}?org_id={ORG_ID}")
     assert get_response.status_code == 404
 
-    list_response = await client.get("/api/meetings")
+    list_response = await client.get(f"/api/meetings?org_id={ORG_ID}")
     assert list_response.status_code == 200
     assert list_response.json() == {"items": [], "total": 0}
 
 
 @pytest.mark.asyncio
-async def test_update_meeting_title(client: AsyncClient) -> None:
+async def test_update_meeting_title(client: HttpAsyncClient) -> None:
     create_response = await client.post(
         "/api/meetings",
-        json={"meeting_url": "https://meet.google.com/abc-defg-hij"},
+        json={"meeting_url": "https://meet.google.com/abc-defg-hij", "org_id": ORG_ID},
     )
     meeting_id = create_response.json()["id"]
 
-    response = await client.patch(f"/api/meetings/{meeting_id}", json={"title": "New title"})
+    response = await client.patch(
+        f"/api/meetings/{meeting_id}?org_id={ORG_ID}",
+        json={"title": "New title"},
+    )
 
     assert response.status_code == 200
     assert response.json()["title"] == "New title"
@@ -193,44 +213,46 @@ async def test_update_meeting_title(client: AsyncClient) -> None:
 
 @pytest.mark.asyncio
 async def test_rename_participant_updates_segment_labels(
-    client: AsyncClient,
-    db_sessionmaker: async_sessionmaker[AsyncSession],
+    client: HttpAsyncClient,
+    firestore_client: AsyncClient,
 ) -> None:
-    now = datetime.now(UTC)
-    async with db_sessionmaker() as session:
-        meeting = Meeting(
-            id="meeting_123",
-            meeting_url="https://meet.google.com/abc-defg-hij",
-            platform="meet",
-            status="complete",
-            created_at=now,
-            updated_at=now,
-        )
-        participant = Participant(meeting_id="meeting_123", recall_id="1", name="Alice")
-        session.add_all([meeting, participant])
-        await session.flush()
-        session.add(
-            TranscriptSegment(
-                meeting_id="meeting_123",
-                participant_id=participant.id,
-                speaker_label="Alice",
-                text="Hello team",
-                start_ms=500,
-                end_ms=1300,
-            )
-        )
-        await session.commit()
-        participant_id = participant.id
+    meeting = await seed_meeting(firestore_client, meeting_id="meeting_123", org_id=ORG_ID)
+    meeting["participants"] = [
+        {
+            "id": 1,
+            "meeting_id": "meeting_123",
+            "recall_id": "1",
+            "name": "Alice",
+            "display_name": None,
+            "is_host": False,
+        }
+    ]
+    await meetings_repo.update_meeting(firestore_client, ORG_ID, "meeting_123", {"participants": meeting["participants"]})
+    await meetings_repo.add_transcript_data(
+        firestore_client,
+        ORG_ID,
+        "meeting_123",
+        meeting["participants"],
+        [
+            {
+                "id": 1,
+                "meeting_id": "meeting_123",
+                "participant_id": 1,
+                "speaker_label": "Alice",
+                "text": "Hello team",
+                "start_ms": 500,
+                "end_ms": 1300,
+            }
+        ],
+    )
 
     response = await client.patch(
-        f"/api/meetings/meeting_123/participants/{participant_id}",
+        f"/api/meetings/meeting_123/participants/1?org_id={ORG_ID}",
         json={"display_name": "Alice Cooper"},
     )
 
     assert response.status_code == 200
     assert response.json()["display_name"] == "Alice Cooper"
-
-    async with db_sessionmaker() as session:
-        segment = await session.scalar(select(TranscriptSegment))
-        assert segment is not None
-        assert segment.speaker_label == "Alice Cooper"
+    updated = await meetings_repo.get_meeting(firestore_client, ORG_ID, "meeting_123")
+    assert updated is not None
+    assert updated["segments"][0]["speaker_label"] == "Alice Cooper"

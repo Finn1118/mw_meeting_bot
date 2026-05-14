@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, Field
 
 
 class ErrorResponse(BaseModel):
@@ -11,7 +11,7 @@ class ErrorResponse(BaseModel):
 class MeetingCreate(BaseModel):
     meeting_url: str = Field(min_length=1)
     title: str | None = None
-    org_id: str | None = None
+    org_id: str = Field(min_length=1)
     created_by_uid: str | None = None
     platform_conversation_id: str | None = None
 
@@ -25,8 +25,6 @@ class ParticipantUpdate(BaseModel):
 
 
 class ParticipantRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     meeting_id: str
     recall_id: str | None
@@ -36,8 +34,6 @@ class ParticipantRead(BaseModel):
 
 
 class TranscriptSegmentRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: int
     meeting_id: str
     participant_id: int | None
@@ -48,8 +44,6 @@ class TranscriptSegmentRead(BaseModel):
 
 
 class MeetingRead(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
     id: str
     meeting_url: str
     platform: str

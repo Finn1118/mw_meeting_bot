@@ -1,18 +1,16 @@
 import logging
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import uuid4
 
 import httpx
 from fastapi import APIRouter, Depends, Query, Response, status
-from sqlalchemy import ColumnElement, Select, func, select, update
-from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
+from google.cloud.firestore_v1 import AsyncClient
 
 from app.config import Settings
-from app.deps import get_app_settings, get_recall_client, get_session
+from app.deps import get_app_settings, get_firestore, get_recall_client
 from app.errors import ApiError
-from app.models import Meeting, Participant, TranscriptSegment
+from app.repositories import meetings as meetings_repo
 from app.schemas import (
     ErrorResponse,
     MeetingCreate,
@@ -28,7 +26,7 @@ from app.services.url_parser import parse_meeting_url
 router = APIRouter(prefix="/api/meetings", tags=["meetings"])
 logger = logging.getLogger("uvicorn.error")
 
-SessionDep = Annotated[AsyncSession, Depends(get_session)]
+FirestoreDep = Annotated[AsyncClient, Depends(get_firestore)]
 RecallDep = Annotated[RecallClient, Depends(get_recall_client)]
 SettingsDep = Annotated[Settings, Depends(get_app_settings)]
 
@@ -41,10 +39,6 @@ def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
-def meeting_read(meeting: Meeting) -> MeetingRead:
-    return MeetingRead.model_validate(meeting)
-
-
 def bot_id_from_response(response: dict[str, object]) -> str:
     bot_id = response.get("id")
     if not isinstance(bot_id, str) or not bot_id:
@@ -53,28 +47,24 @@ def bot_id_from_response(response: dict[str, object]) -> str:
 
 
 async def get_active_meeting_or_404(
-    session: AsyncSession,
+    db: AsyncClient,
+    org_id: str,
     meeting_id: str,
-    org_id: str | None = None,
-) -> Meeting:
-    filters = [Meeting.id == meeting_id, Meeting.deleted_at.is_(None)]
-    if org_id is not None:
-        filters.append(Meeting.org_id == org_id)
-
-    meeting = await session.scalar(
-        select(Meeting)
-        .where(*filters)
-        .options(selectinload(Meeting.participants), selectinload(Meeting.segments))
-    )
+) -> dict[str, object]:
+    meeting = await meetings_repo.get_meeting(db, org_id, meeting_id)
     if meeting is None:
         raise error_response(status.HTTP_404_NOT_FOUND, "not_found", "Meeting not found.")
     return meeting
 
 
-@router.post("", response_model=MeetingRead, responses={400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}, 507: {"model": ErrorResponse}})
+@router.post(
+    "",
+    response_model=MeetingRead,
+    responses={400: {"model": ErrorResponse}, 502: {"model": ErrorResponse}, 507: {"model": ErrorResponse}},
+)
 async def create_meeting(
     payload: MeetingCreate,
-    session: SessionDep,
+    db: FirestoreDep,
     recall_client: RecallDep,
     settings: SettingsDep,
 ) -> MeetingRead:
@@ -84,114 +74,116 @@ async def create_meeting(
         raise error_response(status.HTTP_400_BAD_REQUEST, "invalid_url", "Meeting URL is not supported.") from exc
 
     now = utc_now()
-    meeting = Meeting(
-        id=uuid4().hex,
-        meeting_url=parsed_url.normalized_url,
-        platform=parsed_url.platform,
-        title=payload.title,
-        org_id=payload.org_id,
-        created_by_uid=payload.created_by_uid,
-        platform_conversation_id=payload.platform_conversation_id,
-        status="dispatching",
-        created_at=now,
-        updated_at=now,
-    )
-    session.add(meeting)
-    await session.flush()
+    meeting: dict[str, Any] = {
+        "id": uuid4().hex,
+        "meeting_url": parsed_url.normalized_url,
+        "platform": parsed_url.platform,
+        "title": payload.title,
+        "org_id": payload.org_id,
+        "created_by_uid": payload.created_by_uid,
+        "platform_conversation_id": payload.platform_conversation_id,
+        "bot_id": None,
+        "recording_id": None,
+        "transcript_id": None,
+        "status": "dispatching",
+        "sub_code": None,
+        "started_at": None,
+        "ended_at": None,
+        "duration_sec": None,
+        "transcript_path": None,
+        "recording_path": None,
+        "deleted_at": None,
+        "participants": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+    await meetings_repo.create_meeting(db, meeting)
 
     try:
         bot_response = await recall_client.create_bot(
             meeting_url=parsed_url.normalized_url,
             bot_name=settings.recall_bot_name,
         )
-        meeting.bot_id = bot_id_from_response(bot_response)
-        meeting.status = "bot_created"
-        meeting.updated_at = utc_now()
-        await session.commit()
+        updated = await meetings_repo.update_meeting(
+            db,
+            payload.org_id,
+            str(meeting["id"]),
+            {"bot_id": bot_id_from_response(bot_response), "status": "bot_created"},
+        )
     except RecallPoolExhausted as exc:
         logger.warning("Recall bot pool exhausted during dispatch: status=%s body=%s", exc.status_code, exc.body)
-        meeting.status = "failed"
-        meeting.sub_code = "dispatch_error"
-        meeting.updated_at = utc_now()
-        await session.commit()
+        await meetings_repo.update_meeting(
+            db,
+            payload.org_id,
+            str(meeting["id"]),
+            {"status": "failed", "sub_code": "dispatch_error"},
+        )
         raise error_response(status.HTTP_507_INSUFFICIENT_STORAGE, "recall_pool_exhausted", "Recall bot pool is exhausted. Try again later.") from exc
     except (RecallApiError, httpx.HTTPError, ValueError) as exc:
         if isinstance(exc, RecallApiError):
             logger.warning("Recall dispatch failed: status=%s body=%s", exc.status_code, exc.body)
         else:
             logger.warning("Recall dispatch failed before API response: %s", exc)
-        meeting.status = "failed"
-        meeting.sub_code = "dispatch_error"
-        meeting.updated_at = utc_now()
-        await session.commit()
+        await meetings_repo.update_meeting(
+            db,
+            payload.org_id,
+            str(meeting["id"]),
+            {"status": "failed", "sub_code": "dispatch_error"},
+        )
         raise error_response(status.HTTP_502_BAD_GATEWAY, "recall_api_error", "Recall API request failed.") from exc
 
-    await session.refresh(meeting, attribute_names=["participants", "segments"])
-    return meeting_read(meeting)
+    return MeetingRead.model_validate(updated)
 
 
 @router.get("", response_model=MeetingList)
 async def list_meetings(
-    session: SessionDep,
+    db: FirestoreDep,
+    org_id: Annotated[str, Query(min_length=1)],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
     platform: Annotated[str | None, Query(pattern="^(zoom|meet|teams)$")] = None,
-    org_id: Annotated[str | None, Query(min_length=1)] = None,
 ) -> MeetingList:
-    filters: list[ColumnElement[bool]] = [Meeting.deleted_at.is_(None)]
-    if platform is not None:
-        filters.append(Meeting.platform == platform)
-    if org_id is not None:
-        filters.append(Meeting.org_id == org_id)
-
-    total = await session.scalar(select(func.count()).select_from(Meeting).where(*filters))
-    query: Select[tuple[Meeting]] = (
-        select(Meeting)
-        .where(*filters)
-        .options(selectinload(Meeting.participants), selectinload(Meeting.segments))
-        .order_by(Meeting.started_at.is_not(None), Meeting.started_at.desc(), Meeting.created_at.desc())
-        .limit(limit)
-        .offset(offset)
+    result = await meetings_repo.list_meetings(
+        db,
+        org_id,
+        limit=limit,
+        offset=offset,
+        platform=platform,
     )
-    meetings = list((await session.scalars(query)).all())
-    return MeetingList(items=[meeting_read(meeting) for meeting in meetings], total=total or 0)
+    return MeetingList.model_validate(result)
 
 
 @router.get("/{meeting_id}", response_model=MeetingRead, responses={404: {"model": ErrorResponse}})
 async def get_meeting(
     meeting_id: str,
-    session: SessionDep,
-    org_id: Annotated[str | None, Query(min_length=1)] = None,
+    db: FirestoreDep,
+    org_id: Annotated[str, Query(min_length=1)],
 ) -> MeetingRead:
-    meeting = await get_active_meeting_or_404(session, meeting_id, org_id)
-    return meeting_read(meeting)
+    meeting = await get_active_meeting_or_404(db, org_id, meeting_id)
+    return MeetingRead.model_validate(meeting)
 
 
 @router.patch("/{meeting_id}", response_model=MeetingRead, responses={404: {"model": ErrorResponse}})
 async def update_meeting(
     meeting_id: str,
     payload: MeetingUpdate,
-    session: SessionDep,
-    org_id: Annotated[str | None, Query(min_length=1)] = None,
+    db: FirestoreDep,
+    org_id: Annotated[str, Query(min_length=1)],
 ) -> MeetingRead:
-    meeting = await get_active_meeting_or_404(session, meeting_id, org_id)
-    meeting.title = payload.title
-    meeting.updated_at = utc_now()
-    await session.commit()
-    await session.refresh(meeting, attribute_names=["participants", "segments"])
-    return meeting_read(meeting)
+    meeting = await meetings_repo.update_meeting(db, org_id, meeting_id, {"title": payload.title})
+    if meeting is None:
+        raise error_response(status.HTTP_404_NOT_FOUND, "not_found", "Meeting not found.")
+    return MeetingRead.model_validate(meeting)
 
 
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT, responses={404: {"model": ErrorResponse}})
 async def delete_meeting(
     meeting_id: str,
-    session: SessionDep,
-    org_id: Annotated[str | None, Query(min_length=1)] = None,
+    db: FirestoreDep,
+    org_id: Annotated[str, Query(min_length=1)],
 ) -> Response:
-    meeting = await get_active_meeting_or_404(session, meeting_id, org_id)
-    meeting.deleted_at = utc_now()
-    meeting.updated_at = utc_now()
-    await session.commit()
+    if not await meetings_repo.soft_delete_meeting(db, org_id, meeting_id):
+        raise error_response(status.HTTP_404_NOT_FOUND, "not_found", "Meeting not found.")
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
@@ -204,32 +196,16 @@ async def update_participant(
     meeting_id: str,
     participant_id: int,
     payload: ParticipantUpdate,
-    session: SessionDep,
-    org_id: Annotated[str | None, Query(min_length=1)] = None,
+    db: FirestoreDep,
+    org_id: Annotated[str, Query(min_length=1)],
 ) -> ParticipantRead:
-    await get_active_meeting_or_404(session, meeting_id, org_id)
-    participant = await session.scalar(
-        select(Participant).where(
-            Participant.id == participant_id,
-            Participant.meeting_id == meeting_id,
-        )
+    participant = await meetings_repo.update_participant_display_name(
+        db,
+        org_id,
+        meeting_id,
+        participant_id,
+        payload.display_name,
     )
     if participant is None:
         raise error_response(status.HTTP_404_NOT_FOUND, "not_found", "Participant not found.")
-
-    participant.display_name = payload.display_name
-    await session.execute(
-        update(TranscriptSegment)
-        .where(
-            TranscriptSegment.meeting_id == meeting_id,
-            TranscriptSegment.participant_id == participant_id,
-        )
-        .values(speaker_label=payload.display_name)
-    )
-
-    meeting = await session.scalar(select(Meeting).where(Meeting.id == meeting_id))
-    if meeting is not None:
-        meeting.updated_at = utc_now()
-    await session.commit()
-    await session.refresh(participant)
     return ParticipantRead.model_validate(participant)

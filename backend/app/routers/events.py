@@ -3,7 +3,7 @@ import json
 import os
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -20,10 +20,13 @@ class TestPublishRequest(BaseModel):
 
 
 @router.get("")
-async def stream_events(meeting_id: str, request: Request) -> EventSourceResponse:
+async def stream_events(meeting_id: str, request: Request, org_id: str | None = None) -> EventSourceResponse:
     async def event_generator() -> AsyncIterator[dict[str, str]]:
-        subscription = bus.subscribe(meeting_id).__aiter__()
-        next_event = asyncio.create_task(subscription.__anext__())
+        subscription = cast(Any, bus.subscribe(meeting_id))
+        subscription_iter = subscription.__aiter__()
+        next_event: asyncio.Task[dict[str, Any]] = asyncio.create_task(
+            cast(Any, subscription_iter.__anext__())
+        )
         try:
             while not await request.is_disconnected():
                 try:
@@ -33,7 +36,7 @@ async def stream_events(meeting_id: str, request: Request) -> EventSourceRespons
                     continue
 
                 yield {"event": "update", "data": json.dumps(event)}
-                next_event = asyncio.create_task(subscription.__anext__())
+                next_event = asyncio.create_task(cast(Any, subscription_iter.__anext__()))
         finally:
             next_event.cancel()
             with suppress(asyncio.CancelledError):

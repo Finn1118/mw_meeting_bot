@@ -6,14 +6,13 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from google.cloud.firestore_v1 import AsyncClient
 from starlette.responses import RedirectResponse
 
 from app.config import Settings
-from app.deps import get_app_settings, get_session
+from app.deps import get_app_settings, get_firestore
 from app.errors import ApiError
-from app.models import GoogleConnection
+from app.repositories.google import delete_google_connection, get_google_connection, upsert_google_connection
 from app.schemas import GoogleAuthStatus
 
 router = APIRouter(prefix="/api/auth/google", tags=["google-auth"])
@@ -21,7 +20,6 @@ router = APIRouter(prefix="/api/auth/google", tags=["google-auth"])
 AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 TOKEN_URL = "https://oauth2.googleapis.com/token"
 USERINFO_URL = "https://openidconnect.googleapis.com/v1/userinfo"
-DEMO_CONNECTION_ID = "demo"
 STATE_TTL_SECONDS = 10 * 60
 SCOPES = [
     "openid",
@@ -31,6 +29,7 @@ SCOPES = [
 ]
 
 _state_expirations: dict[str, float] = {}
+_state_orgs: dict[str, str] = {}
 
 
 def require_google_config(settings: Settings) -> None:
@@ -42,24 +41,32 @@ def require_google_config(settings: Settings) -> None:
         )
 
 
-def remember_state(state: str) -> None:
+def remember_state(state: str, org_id: str) -> None:
     now = time.time()
     expired = [key for key, expires_at in _state_expirations.items() if expires_at <= now]
     for key in expired:
         _state_expirations.pop(key, None)
+        _state_orgs.pop(key, None)
     _state_expirations[state] = now + STATE_TTL_SECONDS
+    _state_orgs[state] = org_id
 
 
-def consume_state(state: str) -> bool:
+def consume_state(state: str) -> str | None:
     expires_at = _state_expirations.pop(state, None)
-    return expires_at is not None and expires_at > time.time()
+    org_id = _state_orgs.pop(state, None)
+    if expires_at is None or expires_at <= time.time():
+        return None
+    return org_id
 
 
 @router.get("/start")
-async def start_google_auth(settings: Settings = Depends(get_app_settings)) -> RedirectResponse:
+async def start_google_auth(
+    org_id: Annotated[str, Query(min_length=1)],
+    settings: Settings = Depends(get_app_settings),
+) -> RedirectResponse:
     require_google_config(settings)
     state = secrets.token_urlsafe(32)
-    remember_state(state)
+    remember_state(state, org_id)
     params = {
         "client_id": settings.google_oauth_client_id,
         "redirect_uri": settings.google_oauth_redirect_uri,
@@ -76,31 +83,38 @@ async def start_google_auth(settings: Settings = Depends(get_app_settings)) -> R
 async def google_auth_callback(
     code: Annotated[str, Query(min_length=1)],
     state: Annotated[str, Query(min_length=1)],
-    session: AsyncSession = Depends(get_session),
+    db: AsyncClient = Depends(get_firestore),
     settings: Settings = Depends(get_app_settings),
 ) -> RedirectResponse:
     require_google_config(settings)
-    if not consume_state(state):
+    org_id = consume_state(state)
+    if org_id is None:
         raise ApiError(status.HTTP_400_BAD_REQUEST, "invalid_state", "Google OAuth state is invalid.")
 
     token_payload = await exchange_code_for_token(code, settings)
     email = await fetch_google_email(token_payload)
-    await upsert_google_connection(session, token_payload, email)
+    await upsert_google_connection(db, org_id, google_connection_payload(token_payload, email))
     return RedirectResponse(f"{settings.frontend_base_url.rstrip('/')}/calendar")
 
 
 @router.get("/status", response_model=GoogleAuthStatus)
-async def google_auth_status(session: AsyncSession = Depends(get_session)) -> GoogleAuthStatus:
-    connection = await session.get(GoogleConnection, DEMO_CONNECTION_ID)
-    return GoogleAuthStatus(connected=connection is not None, email=connection.email if connection else None)
+async def google_auth_status(
+    org_id: Annotated[str, Query(min_length=1)],
+    db: AsyncClient = Depends(get_firestore),
+) -> GoogleAuthStatus:
+    connection = await get_google_connection(db, org_id)
+    return GoogleAuthStatus(
+        connected=connection is not None,
+        email=connection.get("email") if connection else None,
+    )
 
 
 @router.post("/disconnect")
-async def disconnect_google(session: AsyncSession = Depends(get_session)) -> dict[str, bool]:
-    connection = await session.get(GoogleConnection, DEMO_CONNECTION_ID)
-    if connection is not None:
-        await session.delete(connection)
-        await session.commit()
+async def disconnect_google(
+    org_id: Annotated[str, Query(min_length=1)],
+    db: AsyncClient = Depends(get_firestore),
+) -> dict[str, bool]:
+    await delete_google_connection(db, org_id)
     return {"ok": True}
 
 
@@ -146,19 +160,14 @@ async def fetch_google_email(token_payload: dict[str, Any]) -> str | None:
 
     payload = response.json()
     if isinstance(payload, dict) and isinstance(payload.get("email"), str):
-        return payload["email"]
+        return str(payload["email"])
     return None
 
 
-async def upsert_google_connection(
-    session: AsyncSession,
-    token_payload: dict[str, Any],
-    email: str | None,
-) -> None:
+def google_connection_payload(token_payload: dict[str, Any], email: str | None) -> dict[str, Any]:
     now = datetime.now(UTC)
     expires_in = token_payload.get("expires_in")
     expires_delta = int(expires_in) if isinstance(expires_in, int) else 3600
-    expires_at = now + timedelta(seconds=expires_delta)
     access_token = token_payload["access_token"]
     if not isinstance(access_token, str):
         raise ApiError(
@@ -166,31 +175,13 @@ async def upsert_google_connection(
             "google_oauth_failed",
             "Google OAuth token response was invalid.",
         )
+
     refresh_token = token_payload.get("refresh_token")
     scope = token_payload.get("scope")
-
-    connection = await session.scalar(
-        select(GoogleConnection).where(GoogleConnection.id == DEMO_CONNECTION_ID)
-    )
-    if connection is None:
-        connection = GoogleConnection(
-            id=DEMO_CONNECTION_ID,
-            email=email,
-            access_token=access_token,
-            refresh_token=refresh_token if isinstance(refresh_token, str) else None,
-            scope=scope if isinstance(scope, str) else None,
-            expires_at=expires_at,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(connection)
-    else:
-        connection.email = email
-        connection.access_token = access_token
-        if isinstance(refresh_token, str):
-            connection.refresh_token = refresh_token
-        connection.scope = scope if isinstance(scope, str) else connection.scope
-        connection.expires_at = expires_at
-        connection.updated_at = now
-
-    await session.commit()
+    return {
+        "email": email,
+        "access_token": access_token,
+        "refresh_token": refresh_token if isinstance(refresh_token, str) else None,
+        "scope": scope if isinstance(scope, str) else None,
+        "expires_at": now + timedelta(seconds=expires_delta),
+    }

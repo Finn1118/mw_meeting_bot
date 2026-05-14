@@ -1,11 +1,6 @@
 import logging
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
-
-from app.models import Participant, TranscriptSegment
-
 logger = logging.getLogger(__name__)
 
 
@@ -18,18 +13,10 @@ def relative_seconds_to_ms(value: object) -> int:
 async def parse_transcript(
     meeting_id: str,
     raw: list[object],
-    session: AsyncSession,
-) -> tuple[list[Participant], list[TranscriptSegment]]:
-    existing_participants = {
-        participant.recall_id: participant
-        for participant in await session.scalars(
-            select(Participant).where(Participant.meeting_id == meeting_id)
-        )
-        if participant.recall_id is not None
-    }
-
-    participants: list[Participant] = list(existing_participants.values())
-    segments: list[TranscriptSegment] = []
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    existing_participants: dict[str, dict[str, Any]] = {}
+    participants: list[dict[str, Any]] = []
+    segments: list[dict[str, Any]] = []
 
     for utterance in raw:
         try:
@@ -40,33 +27,33 @@ async def parse_transcript(
 
             participant = existing_participants.get(recall_id)
             if participant is None:
-                participant = Participant(
-                    meeting_id=meeting_id,
-                    recall_id=recall_id,
-                    name=name,
-                    is_host=is_host,
-                )
-                session.add(participant)
-                await session.flush()
+                participant_id = int(recall_id) if recall_id.isdigit() else len(participants) + 1
+                participant = {
+                    "id": participant_id,
+                    "meeting_id": meeting_id,
+                    "recall_id": recall_id,
+                    "name": name,
+                    "display_name": None,
+                    "is_host": is_host,
+                }
                 existing_participants[recall_id] = participant
                 participants.append(participant)
 
             text = " ".join(str(word["text"]) for word in words)
-            segment = TranscriptSegment(
-                meeting_id=meeting_id,
-                participant_id=participant.id,
-                speaker_label=participant.display_name or participant.name,
-                text=text,
-                start_ms=relative_seconds_to_ms(words[0]["start_timestamp"]["relative"]),
-                end_ms=relative_seconds_to_ms(words[-1]["end_timestamp"]["relative"]),
-            )
-            session.add(segment)
+            segment = {
+                "id": len(segments) + 1,
+                "meeting_id": meeting_id,
+                "participant_id": participant["id"],
+                "speaker_label": participant["display_name"] or participant["name"],
+                "text": text,
+                "start_ms": relative_seconds_to_ms(words[0]["start_timestamp"]["relative"]),
+                "end_ms": relative_seconds_to_ms(words[-1]["end_timestamp"]["relative"]),
+            }
             segments.append(segment)
         except (KeyError, TypeError, ValueError) as exc:
             # TODO(Cursor Build Prompt, transcript parser section): keep expanding tolerated shapes as Recall samples appear.
             logger.warning("Skipping malformed transcript utterance: %s", exc)
 
-    await session.flush()
     return participants, segments
 
 

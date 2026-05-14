@@ -12,7 +12,6 @@ from app.routers.calendar import router as calendar_router
 from app.routers.events import router as events_router
 from app.routers.google_auth import router as google_auth_router
 from app.routers.meetings import router as meetings_router
-from app.routers.webhooks import router as webhooks_router
 from app.services.calendar_auto_dispatcher import CalendarAutoDispatcher
 from app.services.poller import BotPoller
 from app.services.recall import RecallClient
@@ -45,7 +44,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(title="Meeting Transcription API", version="0.1.0", lifespan=lifespan)
-    app.add_exception_handler(ApiError, api_error_handler)
+    app.add_exception_handler(ApiError, api_error_handler)  # type: ignore[arg-type]
 
     app.add_middleware(
         CORSMiddleware,
@@ -75,8 +74,6 @@ def create_app() -> FastAPI:
     if settings.enable_google_calendar:
         app.include_router(google_auth_router)
         app.include_router(calendar_router)
-    if settings.enable_webhooks:
-        app.include_router(webhooks_router)
 
     return app
 

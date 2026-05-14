@@ -1,0 +1,17 @@
+.git
+.gitignore
+.env
+.env.*
+data/
+frontend/
+docs/
+backend/.venv/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/__pycache__/
+backend/tests/
+backend/app/**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.DS_Store
