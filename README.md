@@ -99,6 +99,7 @@ For local tests, `DISABLE_GCS_UPLOAD=true` avoids writing transcript blobs to re
 | `DISABLE_GCS_UPLOAD` | No | `false` | Skip real GCS upload for tests/local emulators |
 | `ALLOWED_ORIGINS` | No | `http://127.0.0.1:5173` | CORS origins |
 | `FRONTEND_BASE_URL` | No | `http://127.0.0.1:5173` | OAuth redirect target after callback |
+| `GOOGLE_OAUTH_SUCCESS_PATH` | No | `/meetings/calendar` | Frontend route after a successful calendar OAuth callback |
 | `ENABLE_GOOGLE_CALENDAR` | No | `true` | Enable calendar routes and auto-dispatcher |
 | `GOOGLE_OAUTH_CLIENT_ID` | If calendar | - | Millionways-owned Google OAuth client id |
 | `GOOGLE_OAUTH_CLIENT_SECRET` | If calendar | - | Google OAuth client secret |

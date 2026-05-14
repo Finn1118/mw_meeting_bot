@@ -33,6 +33,7 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str | None = None
     google_oauth_redirect_uri: str = "http://127.0.0.1:8000/api/auth/google/callback"
     frontend_base_url: str = "http://127.0.0.1:5173"
+    google_oauth_success_path: str = "/meetings/calendar"
     allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://127.0.0.1:5173"]
     )

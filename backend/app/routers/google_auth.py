@@ -94,7 +94,9 @@ async def google_auth_callback(
     token_payload = await exchange_code_for_token(code, settings)
     email = await fetch_google_email(token_payload)
     await upsert_google_connection(db, org_id, google_connection_payload(token_payload, email))
-    return RedirectResponse(f"{settings.frontend_base_url.rstrip('/')}/calendar")
+    return RedirectResponse(
+        f"{settings.frontend_base_url.rstrip('/')}/{settings.google_oauth_success_path.strip('/')}"
+    )
 
 
 @router.get("/status", response_model=GoogleAuthStatus)

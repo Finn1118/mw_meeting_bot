@@ -89,7 +89,7 @@ async def test_google_callback_persists_tokens(
     )
 
     assert response.status_code == 307
-    assert response.headers["location"] == "http://frontend.test/calendar"
+    assert response.headers["location"] == "http://frontend.test/meetings/calendar"
     connection = await get_google_connection(firestore_client, ORG_ID)
 
     assert connection is not None
