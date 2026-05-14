@@ -5,17 +5,17 @@ from typing import Any
 from uuid import uuid4
 
 import httpx
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from google.cloud.firestore_v1 import AsyncClient
 
 from app.config import Settings
-from app.db import AsyncSessionLocal
-from app.models import CalendarDispatch, Meeting
+from app.firestore_client import get_firestore_client
+from app.repositories import calendar_dispatch as dispatch_repo
+from app.repositories import google as google_repo
+from app.repositories import meetings as meetings_repo
 from app.services.google_calendar import (
     GoogleCalendarError,
     ensure_fresh_token,
     extract_meeting_link,
-    get_active_connection,
     list_primary_events,
 )
 from app.services.recall import RecallApiError, RecallClient, RecallPoolExhausted
@@ -25,9 +25,10 @@ logger = logging.getLogger("uvicorn.error")
 
 
 class CalendarAutoDispatcher:
-    def __init__(self, settings: Settings, recall: RecallClient) -> None:
+    def __init__(self, settings: Settings, recall: RecallClient, db: AsyncClient | None = None) -> None:
         self.settings = settings
         self.recall = recall
+        self.db = db or get_firestore_client()
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -59,13 +60,12 @@ class CalendarAutoDispatcher:
         logger.info("Calendar auto-dispatcher stopped")
 
     async def _tick(self) -> None:
-        async with AsyncSessionLocal() as session:
-            connection = await get_active_connection(session)
-            if connection is None or not connection.auto_dispatch_enabled:
-                return
-
+        connections = await google_repo.list_auto_dispatch_connections(self.db)
+        for org_id, connection in connections:
             try:
-                access_token = await ensure_fresh_token(session, connection, self.settings)
+                access_token, updates = await ensure_fresh_token(connection, self.settings)
+                if updates is not None:
+                    await google_repo.upsert_google_connection(self.db, org_id, updates)
                 now = datetime.now(UTC)
                 events = await list_primary_events(
                     access_token,
@@ -74,18 +74,18 @@ class CalendarAutoDispatcher:
                 )
             except GoogleCalendarError:
                 logger.warning("Calendar auto-dispatch skipped because Google Calendar is unavailable")
-                return
+                continue
 
             for event in events:
-                await self._maybe_dispatch_event(session, event)
+                await self._maybe_dispatch_event(org_id, event)
 
-    async def _maybe_dispatch_event(self, session: AsyncSession, event: dict[str, Any]) -> None:
+    async def _maybe_dispatch_event(self, org_id: str, event: dict[str, Any]) -> None:
         event_id = event.get("id")
         if not isinstance(event_id, str) or not event_id:
             return
         if event.get("status") == "cancelled":
             return
-        if await session.scalar(select(CalendarDispatch).where(CalendarDispatch.google_event_id == event_id)):
+        if await dispatch_repo.is_event_dispatched(self.db, org_id, event_id):
             return
 
         event_start = event_start_datetime(event)
@@ -103,29 +103,33 @@ class CalendarAutoDispatcher:
 
         now = datetime.now(UTC)
         title = str(event.get("summary") or "Calendar meeting")
-        meeting = Meeting(
-            id=uuid4().hex,
-            meeting_url=parsed_url.normalized_url,
-            platform=parsed_url.platform,
-            title=title,
-            status="dispatching",
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(meeting)
-        await session.flush()
+        meeting_id = uuid4().hex
+        meeting: dict[str, Any] = {
+            "id": meeting_id,
+            "meeting_url": parsed_url.normalized_url,
+            "platform": parsed_url.platform,
+            "title": title,
+            "org_id": org_id,
+            "created_by_uid": None,
+            "platform_conversation_id": None,
+            "bot_id": None,
+            "recording_id": None,
+            "transcript_id": None,
+            "status": "dispatching",
+            "sub_code": None,
+            "started_at": None,
+            "ended_at": None,
+            "duration_sec": None,
+            "transcript_path": None,
+            "recording_path": None,
+            "deleted_at": None,
+            "participants": [],
+            "created_at": now,
+            "updated_at": now,
+        }
+        await meetings_repo.create_meeting(self.db, meeting)
 
-        dispatch = CalendarDispatch(
-            google_event_id=event_id,
-            meeting_id=meeting.id,
-            meeting_url=parsed_url.normalized_url,
-            event_title=title,
-            event_start=event_start,
-            dispatched_at=now,
-            status="dispatching",
-        )
-        session.add(dispatch)
-
+        dispatch_status = "dispatching"
         try:
             bot_response = await self.recall.create_bot(
                 meeting_url=parsed_url.normalized_url,
@@ -134,22 +138,43 @@ class CalendarAutoDispatcher:
             bot_id = bot_response.get("id")
             if not isinstance(bot_id, str) or not bot_id:
                 raise ValueError("missing_bot_id")
-            meeting.bot_id = bot_id
-            meeting.status = "bot_created"
-            dispatch.status = "dispatched"
+            await meetings_repo.update_meeting(
+                self.db,
+                org_id,
+                meeting_id,
+                {"bot_id": bot_id, "status": "bot_created"},
+            )
+            dispatch_status = "dispatched"
         except RecallPoolExhausted as exc:
             logger.warning("Calendar auto-dispatch pool exhausted: status=%s body=%s", exc.status_code, exc.body)
-            meeting.status = "failed"
-            meeting.sub_code = "dispatch_error"
-            dispatch.status = "failed"
+            await meetings_repo.update_meeting(
+                self.db,
+                org_id,
+                meeting_id,
+                {"status": "failed", "sub_code": "dispatch_error"},
+            )
+            dispatch_status = "failed"
         except (RecallApiError, httpx.HTTPError, ValueError) as exc:
             logger.warning("Calendar auto-dispatch failed for event %s: %s", event_id, exc)
-            meeting.status = "failed"
-            meeting.sub_code = "dispatch_error"
-            dispatch.status = "failed"
+            await meetings_repo.update_meeting(
+                self.db,
+                org_id,
+                meeting_id,
+                {"status": "failed", "sub_code": "dispatch_error"},
+            )
+            dispatch_status = "failed"
 
-        meeting.updated_at = datetime.now(UTC)
-        await session.commit()
+        await dispatch_repo.record_dispatch(
+            self.db,
+            org_id,
+            event_id,
+            meeting_id=meeting_id,
+            meeting_url=parsed_url.normalized_url,
+            event_title=title,
+            event_start=event_start,
+            dispatched_at=now,
+            status=dispatch_status,
+        )
 
 
 def event_start_datetime(event: dict[str, Any]) -> datetime | None:

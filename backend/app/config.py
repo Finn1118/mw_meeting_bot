@@ -10,7 +10,7 @@ ENV_FILE = Path(__file__).resolve().parents[2] / ".env"
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8", extra="ignore")
 
     recall_api_key: str = Field(min_length=1)
     recall_region: str = "us-east-1"
@@ -22,8 +22,9 @@ class Settings(BaseSettings):
 
     backend_host: str = "127.0.0.1"
     backend_port: int = 8000
-    database_url: str = "sqlite+aiosqlite:///./data/meetings.db"
-    blobs_dir: str = "./backend/app/blobs"
+    firestore_project_id: str = "millionways-platform"
+    firebase_storage_bucket: str = "millionways-platform.firebasestorage.app"
+    disable_gcs_upload: bool = False
     public_webhook_base_url: str | None = None
     enable_google_calendar: bool = True
     calendar_auto_dispatch_interval_seconds: int = 60
@@ -32,6 +33,7 @@ class Settings(BaseSettings):
     google_oauth_client_secret: str | None = None
     google_oauth_redirect_uri: str = "http://127.0.0.1:8000/api/auth/google/callback"
     frontend_base_url: str = "http://127.0.0.1:5173"
+    google_oauth_success_path: str = "/meetings/calendar"
     allowed_origins: Annotated[list[str], NoDecode] = Field(
         default_factory=lambda: ["http://127.0.0.1:5173"]
     )
@@ -61,4 +63,4 @@ class Settings(BaseSettings):
 
 @lru_cache
 def get_settings() -> Settings:
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

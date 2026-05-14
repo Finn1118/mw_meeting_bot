@@ -5,13 +5,13 @@ description = "Local-first meeting transcription backend"
 readme = "../README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "aiosqlite",
-    "alembic",
     "fastapi[standard]",
+    "firebase-admin>=7.4.0",
+    "google-cloud-firestore>=2.27.0",
+    "google-cloud-storage>=3.10.1",
     "httpx",
     "pydantic-settings",
     "python-dotenv",
-    "sqlalchemy[asyncio]",
     "sse-starlette",
     "svix",
 ]

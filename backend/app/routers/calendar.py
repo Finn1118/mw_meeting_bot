@@ -2,11 +2,12 @@ from datetime import UTC, datetime, timedelta
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from google.cloud.firestore_v1 import AsyncClient
 
 from app.config import Settings
-from app.deps import get_app_settings, get_session
+from app.deps import get_app_settings, get_firestore
 from app.errors import ApiError
+from app.repositories.google import get_google_connection, set_auto_dispatch, upsert_google_connection
 from app.schemas import (
     AutoDispatchSetting,
     AutoDispatchUpdate,
@@ -18,7 +19,6 @@ from app.services.google_calendar import (
     GoogleCalendarError,
     ensure_fresh_token,
     extract_meeting_link,
-    get_active_connection,
     list_primary_events,
 )
 
@@ -27,38 +27,40 @@ router = APIRouter(prefix="/api/calendar", tags=["calendar"])
 
 @router.get("/auto-dispatch", response_model=AutoDispatchSetting)
 async def get_auto_dispatch_setting(
-    session: AsyncSession = Depends(get_session),
+    org_id: Annotated[str, Query(min_length=1)],
+    db: AsyncClient = Depends(get_firestore),
 ) -> AutoDispatchSetting:
-    connection = await get_active_connection(session)
-    return AutoDispatchSetting(enabled=connection.auto_dispatch_enabled if connection else False)
+    connection = await get_google_connection(db, org_id)
+    return AutoDispatchSetting(enabled=bool(connection and connection.get("auto_dispatch_enabled")))
 
 
 @router.patch("/auto-dispatch", response_model=AutoDispatchSetting)
 async def update_auto_dispatch_setting(
     payload: AutoDispatchUpdate,
-    session: AsyncSession = Depends(get_session),
+    org_id: Annotated[str, Query(min_length=1)],
+    db: AsyncClient = Depends(get_firestore),
 ) -> AutoDispatchSetting:
-    connection = await get_active_connection(session)
+    connection = await set_auto_dispatch(db, org_id, payload.enabled)
     if connection is None:
         raise ApiError(status.HTTP_409_CONFLICT, "not_connected", "Google Calendar is not connected.")
-
-    connection.auto_dispatch_enabled = payload.enabled
-    await session.commit()
-    return AutoDispatchSetting(enabled=connection.auto_dispatch_enabled)
+    return AutoDispatchSetting(enabled=bool(connection.get("auto_dispatch_enabled")))
 
 
 @router.get("/events", response_model=CalendarEventList)
 async def list_calendar_events(
-    session: AsyncSession = Depends(get_session),
+    org_id: Annotated[str, Query(min_length=1)],
+    db: AsyncClient = Depends(get_firestore),
     settings: Settings = Depends(get_app_settings),
     days: Annotated[int, Query(ge=1, le=30)] = 7,
 ) -> CalendarEventList:
-    connection = await get_active_connection(session)
+    connection = await get_google_connection(db, org_id)
     if connection is None:
         raise ApiError(status.HTTP_409_CONFLICT, "not_connected", "Google Calendar is not connected.")
 
     try:
-        access_token = await ensure_fresh_token(session, connection, settings)
+        access_token, updates = await ensure_fresh_token(connection, settings)
+        if updates is not None:
+            await upsert_google_connection(db, org_id, updates)
         now = datetime.now(UTC)
         events = await list_primary_events(access_token, now, now + timedelta(days=days))
     except GoogleCalendarError as exc:

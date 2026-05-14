@@ -1,15 +1,12 @@
-from collections.abc import AsyncIterator
-
-from sqlalchemy.ext.asyncio import AsyncSession
+from google.cloud.firestore_v1 import AsyncClient
 
 from app.config import Settings, get_settings
-from app.db import AsyncSessionLocal
+from app.firestore_client import get_firestore_client
 from app.services.recall import RecallClient
 
 
-async def get_session() -> AsyncIterator[AsyncSession]:
-    async with AsyncSessionLocal() as session:
-        yield session
+def get_firestore() -> AsyncClient:
+    return get_firestore_client()
 
 
 def get_recall_client() -> RecallClient:

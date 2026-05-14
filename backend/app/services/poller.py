@@ -3,15 +3,14 @@ import logging
 from datetime import UTC, datetime
 from typing import Any
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from google.cloud.firestore_v1 import AsyncClient
 
 from app.config import Settings
-from app.db import AsyncSessionLocal
 from app.events import bus
-from app.models import Meeting
+from app.firestore_client import get_firestore_client
+from app.repositories import meetings as meetings_repo
+from app.services.gcs_storage import save_transcript_json
 from app.services.recall import RecallApiError, RecallClient
-from app.services.storage import save_transcript_json
 from app.services.transcript import parse_transcript
 
 logger = logging.getLogger("uvicorn.error")
@@ -31,9 +30,15 @@ RECALL_STATUS_MAP = {
 
 
 class BotPoller:
-    def __init__(self, settings: Settings, recall: RecallClient) -> None:
+    def __init__(
+        self,
+        settings: Settings,
+        recall: RecallClient,
+        db: AsyncClient | None = None,
+    ) -> None:
         self.settings = settings
         self.recall = recall
+        self.db = db or get_firestore_client()
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
 
@@ -62,28 +67,19 @@ class BotPoller:
         logger.info("Bot poller stopped")
 
     async def _tick(self) -> None:
-        async with AsyncSessionLocal() as session:
-            meetings = list(
-                await session.scalars(
-                    select(Meeting).where(
-                        Meeting.bot_id.is_not(None),
-                        Meeting.status.notin_(TERMINAL_STATUSES),
-                        Meeting.deleted_at.is_(None),
-                    )
-                )
-            )
-            for meeting in meetings:
-                await self._poll_one(session, meeting)
-            await session.commit()
+        meetings = await meetings_repo.list_active_polling_meetings(self.db)
+        for meeting in meetings:
+            await self._poll_one(meeting)
 
-    async def _poll_one(self, session: AsyncSession, meeting: Meeting) -> None:
-        if meeting.bot_id is None:
+    async def _poll_one(self, meeting: dict[str, Any]) -> None:
+        bot_id = meeting.get("bot_id")
+        if not isinstance(bot_id, str):
             return
 
         try:
-            bot = await self.recall.get_bot(meeting.bot_id)
+            bot = await self.recall.get_bot(bot_id)
         except RecallApiError as exc:
-            logger.warning("get_bot failed for %s: %s", meeting.bot_id, exc)
+            logger.warning("get_bot failed for %s: %s", bot_id, exc)
             return
 
         latest_status = latest_recall_status(bot)
@@ -92,68 +88,75 @@ class BotPoller:
 
         recall_code = latest_status.get("code")
         sub_code = latest_status.get("sub_code")
-        new_status = RECALL_STATUS_MAP.get(recall_code, meeting.status)
-        changed = False
+        new_status = RECALL_STATUS_MAP.get(recall_code if isinstance(recall_code, str) else "", str(meeting["status"]))
+        updates: dict[str, Any] = {}
 
-        if new_status != meeting.status:
-            meeting.status = new_status
-            meeting.sub_code = sub_code if isinstance(sub_code, str) else None
-            meeting.updated_at = datetime.now(UTC)
-            changed = True
+        if new_status != meeting["status"]:
+            updates["status"] = new_status
+            updates["sub_code"] = sub_code if isinstance(sub_code, str) else None
 
-        if recall_code == "done" and meeting.status != "complete":
-            finalized = await self._try_finalize_transcript(session, meeting, bot)
-            changed = changed or finalized
+        if recall_code == "done" and meeting["status"] != "complete":
+            finalized = await self._try_finalize_transcript(meeting, bot)
+            updates.update(finalized)
 
-        if changed:
-            await session.flush()
-            await bus.publish(
-                meeting.id,
-                {
-                    "meeting_id": meeting.id,
-                    "status": meeting.status,
-                    "sub_code": meeting.sub_code,
-                },
-            )
+        if not updates:
+            return
+
+        updated = await meetings_repo.update_meeting(
+            self.db,
+            str(meeting["org_id"]),
+            str(meeting["id"]),
+            updates,
+        )
+        await bus.publish(
+            str(meeting["id"]),
+            {
+                "meeting_id": str(meeting["id"]),
+                "status": updated["status"] if updated else updates.get("status", meeting["status"]),
+                "sub_code": updated.get("sub_code") if updated else updates.get("sub_code"),
+            },
+        )
 
     async def _try_finalize_transcript(
         self,
-        session: AsyncSession,
-        meeting: Meeting,
+        meeting: dict[str, Any],
         bot: dict[str, object],
-    ) -> bool:
+    ) -> dict[str, Any]:
         recording = first_recording(bot)
         if recording is None:
-            return False
+            return {}
 
         transcript = transcript_shortcut(recording)
         if transcript is None:
-            return False
+            return {}
 
         transcript_id = transcript.get("id")
         status_code = nested_status_code(transcript)
         if status_code != "done" or not isinstance(transcript_id, str):
-            return False
+            return {}
 
         metadata = await self.recall.get_transcript(transcript_id)
         download_url = transcript_download_url(metadata)
         if download_url is None:
-            return False
+            return {}
 
+        org_id = str(meeting["org_id"])
+        meeting_id = str(meeting["id"])
         raw_transcript = await self.recall.download_transcript_json(download_url)
-        transcript_key = save_transcript_json(self.settings.blobs_dir, meeting.id, raw_transcript)
+        transcript_key = save_transcript_json(self.settings, org_id, meeting_id, raw_transcript)
+        participants, segments = await parse_transcript(meeting_id, raw_transcript)
+        await meetings_repo.add_transcript_data(self.db, org_id, meeting_id, participants, segments)
 
-        meeting.transcript_path = transcript_key
-        meeting.transcript_id = transcript_id
+        updates: dict[str, Any] = {
+            "transcript_path": transcript_key,
+            "transcript_id": transcript_id,
+            "status": "complete",
+            "updated_at": datetime.now(UTC),
+        }
         recording_id = recording.get("id")
         if isinstance(recording_id, str):
-            meeting.recording_id = recording_id
-
-        await parse_transcript(meeting.id, raw_transcript, session)
-
-        meeting.status = "complete"
-        meeting.updated_at = datetime.now(UTC)
-        return True
+            updates["recording_id"] = recording_id
+        return updates
 
 
 def latest_recall_status(bot: dict[str, object]) -> dict[str, Any] | None:
@@ -188,15 +191,13 @@ def transcript_shortcut(recording: dict[str, Any]) -> dict[str, Any] | None:
 def nested_status_code(value: dict[str, Any]) -> str | None:
     status = value.get("status")
     if isinstance(status, dict) and isinstance(status.get("code"), str):
-        return status["code"]
+        return str(status["code"])
     status_code = value.get("status_code")
-    return status_code if isinstance(status_code, str) else None
+    return str(status_code) if isinstance(status_code, str) else None
 
 
 def transcript_download_url(metadata: dict[str, object]) -> str | None:
     data = metadata.get("data")
     if isinstance(data, dict) and isinstance(data.get("download_url"), str):
-        return data["download_url"]
+        return str(data["download_url"])
     return None
-
-

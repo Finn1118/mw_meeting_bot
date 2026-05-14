@@ -3,11 +3,9 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import Settings
-from app.models import GoogleConnection
-from app.routers.google_auth import DEMO_CONNECTION_ID, TOKEN_URL
+from app.routers.google_auth import TOKEN_URL
 from app.services.url_parser import parse_meeting_url
 
 CALENDAR_EVENTS_URL = "https://www.googleapis.com/calendar/v3/calendars/primary/events"
@@ -19,29 +17,30 @@ class GoogleCalendarError(Exception):
     pass
 
 
-async def get_active_connection(session: AsyncSession) -> GoogleConnection | None:
-    return await session.get(GoogleConnection, DEMO_CONNECTION_ID)
-
-
 async def ensure_fresh_token(
-    session: AsyncSession,
-    connection: GoogleConnection,
+    connection: dict[str, object],
     settings: Settings,
-) -> str:
-    expires_at = connection.expires_at
+) -> tuple[str, dict[str, object] | None]:
+    expires_at = connection["expires_at"]
+    if not isinstance(expires_at, datetime):
+        raise GoogleCalendarError("missing_expiration")
     if expires_at.tzinfo is None:
         expires_at = expires_at.replace(tzinfo=UTC)
 
     if expires_at > datetime.now(UTC) + REFRESH_WINDOW:
-        return connection.access_token
+        access_token = connection.get("access_token")
+        if not isinstance(access_token, str):
+            raise GoogleCalendarError("missing_access_token")
+        return access_token, None
 
-    if not connection.refresh_token:
+    refresh_token = connection.get("refresh_token")
+    if not isinstance(refresh_token, str) or not refresh_token:
         raise GoogleCalendarError("missing_refresh_token")
 
     body = {
         "client_id": settings.google_oauth_client_id,
         "client_secret": settings.google_oauth_client_secret,
-        "refresh_token": connection.refresh_token,
+        "refresh_token": refresh_token,
         "grant_type": "refresh_token",
     }
     try:
@@ -58,11 +57,12 @@ async def ensure_fresh_token(
 
     expires_in = payload.get("expires_in")
     expires_delta = int(expires_in) if isinstance(expires_in, int) else 3600
-    connection.access_token = access_token
-    connection.expires_at = datetime.now(UTC) + timedelta(seconds=expires_delta)
-    connection.updated_at = datetime.now(UTC)
-    await session.commit()
-    return access_token
+    updates = {
+        "access_token": access_token,
+        "expires_at": datetime.now(UTC) + timedelta(seconds=expires_delta),
+        "updated_at": datetime.now(UTC),
+    }
+    return access_token, updates
 
 
 async def list_primary_events(
