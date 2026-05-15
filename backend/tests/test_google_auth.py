@@ -9,6 +9,7 @@ from pytest_httpx import HTTPXMock
 from app.config import Settings
 from app.deps import get_app_settings
 from app.main import app
+from app.repositories import oauth_state
 from app.repositories.google import get_google_connection, upsert_google_connection
 from app.routers.google_auth import TOKEN_URL, USERINFO_URL
 
@@ -97,6 +98,35 @@ async def test_google_callback_persists_tokens(
     assert connection["access_token"] == "access-token"
     assert connection["refresh_token"] == "refresh-token"
     assert connection["expires_at"].replace(tzinfo=UTC) > datetime.now(UTC)
+
+
+@pytest.mark.asyncio
+async def test_google_callback_invalid_state(client: HttpAsyncClient) -> None:
+    app.dependency_overrides[get_app_settings] = google_settings
+
+    response = await client.get(
+        "/api/auth/google/callback?code=auth-code&state=does-not-exist",
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 400
+    assert response.json()["error"] == "invalid_state"
+
+
+@pytest.mark.asyncio
+async def test_consume_state_survives_instance_recycle(
+    firestore_client: AsyncClient,
+) -> None:
+    """State is persisted in Firestore, so consuming it works even if the
+    process that issued the state is gone — which is the whole point of the
+    Firestore-backed store on multi-instance Cloud Run."""
+    await oauth_state.remember_state(firestore_client, "state-xyz", ORG_ID)
+
+    consumed = await oauth_state.consume_state(firestore_client, "state-xyz")
+    assert consumed == ORG_ID
+
+    # Second consume returns None — state is single-use.
+    assert await oauth_state.consume_state(firestore_client, "state-xyz") is None
 
 
 @pytest.mark.asyncio
